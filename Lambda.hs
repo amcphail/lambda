@@ -12,7 +12,8 @@
 --
 -----------------------------------------------------------------------------
 
-module Lambda (
+module Main (
+       main,
        Term(Var,Lam,App),
        --
        term, -- Parser Char Term
@@ -31,6 +32,7 @@ import qualified Data.List as L
 import qualified Data.Map as M
 import Parsers
 import Combinators
+import System.IO
 
 {-----------------------------------------------------------------------}
 {- data types -}
@@ -377,11 +379,12 @@ normal = unparse . eval . parse
 main :: IO ()
 main = do
   putStr "lambda term? "
+  hFlush stdout
   input <- getLine
   case input of
        "quit" -> putStr "bye.\n"
        _      -> do putStr ("-> " ++ normal input ++ "\n")
-  main
+                    main
 
 {-----------------------------------------------------------------------}
 

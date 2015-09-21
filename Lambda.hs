@@ -381,7 +381,7 @@ main = do
   case input of
        "quit" -> putStr "bye.\n"
        _      -> do putStr ("-> " ++ normal input ++ "\n")
-  main
+                    main
 
 {-----------------------------------------------------------------------}
 

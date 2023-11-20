@@ -16,13 +16,18 @@ module Main (
        main,
        Term(Con,Var,Lam,App),
        --
-       term, -- Parser Char Term
-               normal,  -- String -> String
-               --
-               parse,   -- DetParser Char Term (i.e. String -> Term)
-               eval,    -- Term -> Term
-               unparse  -- Term -> String
-              )  where
+       term,   -- Parser Char Term
+       normal,  -- String -> String
+       --
+       parse,   -- DetParser Char Term (i.e. String -> Term)
+       eval,    -- Term -> Term
+       unparse, -- Term -> String
+       --
+       DBTerm(DBCon,DBVar,DBLam,DBApp)
+       --
+       to_debruijb,   -- Term -> DBTerm
+       from_debruijn, -- DBTerm -> Term
+       )  where
 
 {-----------------------------------------------------------------------}
 {- imports -}
@@ -344,10 +349,13 @@ normal_order t = do
 
 normal_order' :: Term -> VM Term
 normal_order' t@(Con _)   = return t
-normal_order' t@(Var _)   = return t
+normal_order' t@(Var _)   = do
+  (mu_red,t') <- mu_check t
+  return t'
 normal_order' t@(Lam x m) = do
   n <- normal_order' m
-  return $ Lam x n
+  (e,n') <- eta_check (Lam x n)
+  return n' 
 normal_order' t@(App l m) = do
   (mu_red,ms) <- mu_check t
   if (mu_red) 
@@ -363,6 +371,62 @@ normal_order' t@(App l m) = do
 
 eval :: Names -> Term -> Term
 eval ns t = fst $ runVariableMonad (normal_order t) ns
+
+{-----------------------------------------------------------------------}
+{- de Bruin indices -}
+
+data DBTerm = DBCon Name
+  | DBVar Integer
+  | DBLam DBTerm
+  | DBApp DBTerm DBTerm
+  deriving(Eq,Show,Read)
+
+to_debruijn :: Term -> DBTerm
+to_debruijn = to_debruijn' []
+
+increment :: [(Name,Integer)] -> [(Name,Integer)]
+increment = L.map (\(n,i) -> (n,i+1))
+
+to_debruijn' :: [(Name,Integer)] -> Term -> DBTerm
+to_debruijn' _ (Con c) = DBCon c
+to_debruijn' b (Var v)
+  | elem v (fst $ unzip b) = DBVar ((\(Just i) -> i) $ L.lookup v b)
+  | otherwise              = error $ "to_debruijn': unbound variable" ++ "\n" ++ (show b)
+to_debruijn' b (Lam x m)
+  | elem x (fst $ unzip b) = error "to_debruijn': variable already bound"
+  | otherwise              = DBLam (to_debruijn' ((x,1):(increment b)) m)
+to_debruijn' b (App l m) = let l' = to_debruijn' b l
+                               m' = to_debruijn' b m
+                           in DBApp l' m'
+
+compareByDB :: Term -> Term -> Bool
+compareByDB t1 t2 = to_debruijn t1 == to_debruijn t2
+
+from_debruijn :: DBTerm -> Term
+from_debruijn = from_debruijn' fresh []
+
+from_debruijn' :: [Name] -> [Name] -> DBTerm -> Term
+from_debruijn' _      _  (DBCon c)   = Con c
+from_debruijn' fs     bs (DBVar i)   = Var (head $ L.drop ((fromInteger i)- 1) bs)
+from_debruijn' (f:fs) bs (DBLam l)   = Lam f (from_debruijn' fs (f:bs) l)
+from_debruijn' fs     bs (DBApp l m) = App (from_debruijn' fs bs l) (from_debruijn' fs bs m)
+
+dename :: Term -> VM Term
+dename t@(Con _) = return t
+dename t@(Var v) = do
+  c <- combinator v
+  if isJust c
+    then dename $ (\(Just x) -> x) c
+    else return $ t
+dename (Lam x m) = do
+  m' <- dename m
+  y <- next
+  m'' <- subst' (Var y) x m'
+  normal_order' $ Lam y m''
+dename (App l m) = do
+  l' <- dename l
+  m' <- dename m
+  normal_order' $ App l' m'
 
 {-----------------------------------------------------------------------}
 {- PRINT -}

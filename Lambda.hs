@@ -434,7 +434,7 @@ _print' :: String -> Term -> String
 _print' p   (Con n)                 = print_var p n
 _print' p   (Var n)                 = print_var p n
 _print' p t@(Lam _ _)               = print_lam p t
-_print' p t@(App t1   t2@(App _ _)) = _print' p t1 ++ print_bra (_print' p t2) 
+_print' p t@(App t1   t2@(App _ _)) = _print' p t1 ++ sp p ++ print_bra (_print' p t2) 
 _print' p t@(App t1   t2@(Con _))   = _print'' p t1 ++ sp p ++ _print' p t2  
 _print' p t@(App t1   t2@(Var _))   = _print'' p t1 ++ sp p ++ _print' p t2  
 _print' p t@(App t1   t2)           = _print'' p t1 ++ _print'' p t2 

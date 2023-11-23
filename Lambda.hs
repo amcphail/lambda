@@ -23,10 +23,10 @@ module Main (
        eval,    -- Term -> Term
        unparse, -- Term -> String
        --
-       DBTerm(DBCon,DBVar,DBLam,DBApp)
+       DBTerm(DBCon,DBVar,DBLam,DBApp),
        --
-       to_debruijb,   -- Term -> DBTerm
-       from_debruijn, -- DBTerm -> Term
+       to_debruijn,   -- Term -> DBTerm
+       from_debruijn  -- DBTerm -> Term
        )  where
 
 {-----------------------------------------------------------------------}

@@ -1,7 +1,7 @@
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Lambda
--- Copyright   :  (c) Alexander Vivian Hugh McPhail 2000, 2015
+-- Copyright   :  (c) Alexander Vivian Hugh McPhail 2000, 2015, 2023
 -- License     :  BSD3
 --
 -- Maintainer  :  haskell.vivian.mcphail <at> gmail <dot> com
@@ -14,24 +14,31 @@
 
 module Main (
        main,
-       Term(Var,Lam,App),
+       Term(Con,Var,Lam,App),
        --
-       term, -- Parser Char Term
-               normal,  -- String -> String
-               --
-               parse,   -- DetParser Char Term (i.e. String -> Term)
-               eval,    -- Term -> Term
-               unparse  -- Term -> String
-              )  where
+       term,   -- Parser Char Term
+       normal,  -- String -> String
+       --
+       parse,   -- DetParser Char Term (i.e. String -> Term)
+       eval,    -- Term -> Term
+       unparse, -- Term -> String
+       --
+       DBTerm(DBCon,DBVar,DBLam,DBApp),
+       --
+       to_debruijn,   -- Term -> DBTerm
+       from_debruijn  -- DBTerm -> Term
+       )  where
 
 {-----------------------------------------------------------------------}
 {- imports -}
+
+import Control.Monad.State
 
 import Data.Char
 import qualified Data.List as L
 import qualified Data.Map as M
 import Parsers
-import Combinators
+import Names
 import System.IO
 
 {-----------------------------------------------------------------------}
@@ -39,9 +46,10 @@ import System.IO
 
 type Name = String
 
-data Term = Var Name
+data Term = Con Name
+          | Var Name
           | Lam Name Term
-  | App Term Term
+          | App Term Term
   deriving (Eq,Read)
 
 {-----------------------------------------------------------------------}
@@ -162,9 +170,64 @@ fresh :: [Name]
 fresh = [ "_" ++ (show x) | x <- [1..] ]
 
 {-----------------------------------------------------------------------}
+{- a monad to encapsulate variables -}
+
+data Names = ND {
+  combs :: M.Map Name Term
+  , consts :: M.Map Name ()
+  , vars :: [Name] }
+  
+newtype VM a = MVM { runVariableMonad :: Names -> (a,Names) }
+
+instance Monad VM where
+    (MVM p) >>= q = MVM (\s -> let (x,n')   = p s
+                                   MVM g    = q x
+                                   (x',n'') = g n'
+                               in (x',n''))
+
+instance Functor VM where
+  fmap f (MVM g) = MVM (\s -> let (a,s') = g s in (f a,s'))
+  
+instance Applicative VM where
+  pure x = MVM (\s -> (x,s))
+  
+  (MVM f) <*> (MVM x) = MVM (\s -> let (f',s') = f s
+                                       (x',s'') = x s'
+                                   in (f' x',s''))
+  
+
+instance MonadFail VM where
+  fail = error "Variable Monad"
+  
+instance MonadState Names VM where
+  get = MVM (\fs -> (fs,fs))
+  put fs = MVM (\_ -> ((),fs))
+
+next :: VM Name
+next = do
+       (ND cb ct (f:fs)) <- get 
+       put (ND cb ct fs)
+       return f
+
+combinator :: Name -> VM (Maybe Term)
+combinator n = do
+  cb <- gets combs
+  return $ M.lookup n cb
+
+isJust :: Maybe a -> Bool
+isJust Nothing  = False
+isJust (Just _) = True
+
+constant :: Name -> VM Bool
+constant n = do
+  ct <- gets consts
+  return $ M.member n ct
+  
+{-----------------------------------------------------------------------}
 {- the set of free variables -}
 
 frees :: Term -> [Name]
+frees (Con _) = []
 frees (Var x)   = [x]
 frees (Lam x n) = L.delete x (frees n)
 frees (App m n) = combine (frees n) (frees m) where
@@ -177,43 +240,49 @@ frees (App m n) = combine (frees n) (frees m) where
 {-----------------------------------------------------------------------}
 {- the substitution algorithm -}
 
-subst :: Term -> Name -> Term -> Term
-subst n x m = snd (subst' fresh n x m)
+--subst :: Term -> Name -> Term -> Term
+--subst n x m = fst $ runVariableMonad (subst' n x m) fresh
 
-subst' :: [Name] -> Term -> Name -> Term -> ([Name],Term)
-subst' f        n x (Var y)
-     | x == y                   = (f,n)
-     | otherwise                = (f,(Var y))
-subst' f        n x (App l m)   = let (f',m')   = (subst' f  n x l)
-                                      (f'',n')  = (subst' f' n x m)
-                                  in (f'',(App m' n'))
-subst' f@(z:fs) n x (Lam y m)
+subst' :: Term -> Name -> Term -> VM Term
+subst' n x (Con c)     = return $ Con c
+subst' n x (Var y)
+     | x == y          = return n
+     | otherwise       = return $ Var y
+subst' n x (App l m)   = do
+                         l' <- subst' n x l
+                         m' <- subst' n x m
+                         return $ App l' m'
+subst' n x (Lam y m)
      | (not (elem y (frees n)))
-       && (x /= y)              = let (f',m')   = (subst' f n x m)
-                                in (f',(Lam y m'))
-     | otherwise                = let (f',m')   = (subst' fs (Var z) y m)
-                                      (f'',m'') = (subst' f' n       x m')
-                                  in (f'',(Lam z m''))
+       && (x /= y)              = do
+                                  m' <- subst' n x m
+                                  return $ Lam y m'
+     | otherwise                = do
+                                  z <- next
+                                  m' <- subst' (Var z) y m
+                                  m'' <- subst' n x m'
+                                  return $ Lam z m''
 
 {-----------------------------------------------------------------------}
 {- reduction strategies -}
 
 {- beta reduction -}
 
-beta_reduce :: [Name] -> Term -> (Bool,([Name],Term))
-beta_reduce f (App (Lam x m) n) = (True,subst' f n x m)
-beta_reduce _ _                 = error "Lambda:beta_reduce"
+beta_reduce :: Term -> VM (Bool,Term)
+beta_reduce (App (Lam x m) n) = do
+                                b <- subst' n x m
+                                return (True,b)
+beta_reduce _                 = error "Lambda:beta_reduce"
 
 {- mu reduction -}
 
-mu_reduce :: CombinatorStore -> Term -> (Bool,Term)
-mu_reduce c t@(Var v)
-  | M.member v c   = (True,parse ((\(Just x) -> x) (M.lookup v c)))
-  | otherwise      = (False,t)
---mu_reduce c t@(Var n)      = (False,t)
-mu_reduce _ _              = error "Lambda:mu_reduce"
-
-{- eta reduction -}
+mu_reduce :: Term -> VM (Bool,Term)
+mu_reduce t@(Var v) = do
+  c <- combinator v
+  if isJust c
+    then return $ (True,(\(Just x) -> x) c)
+    else return $ (False,t)
+mu_reduce _      = error "Lambda:mu_reduce"
 
 eta_reduce :: Term -> (Bool,Term)
 eta_reduce t@(Lam x (App m (Var y)))
@@ -224,57 +293,140 @@ eta_reduce _                             = error "Lambda:eta_reduce"
 {-----------------------------------------------------------------------}
 {- functions to check whether a reduction was performed -}
 
-recurse_check :: [Name] -> CombinatorStore
-      -> Bool -> Term -> Term -> Term
-      -> ([Name] -> CombinatorStore -> Term -> (Bool,([Name],Term)))
-      -> (Bool,([Name],Term))
-recurse_check fs c True ts _  n _ = (True,(fs,App ts n))
-recurse_check fs c _    _  t1 n f = let (red,(fs',ns)) = f fs c n 
- in  (red,(fs',App t1 ns))
+recurse_check :: Bool -> Term -> Term -> Term
+      -> (Term -> VM (Bool,Term))
+      -> VM (Bool,Term)
+recurse_check True ts _  n _ = return (True,App ts n)
+recurse_check _    _  t1 n f = do
+                               (red,ns) <- f n 
+                               return (red,App t1 ns)
 
-bet_check :: [Name] -> CombinatorStore -> Term -> (Bool,([Name],Term))
-bet_check fs c t@(App    (Lam _ _) n) = beta_reduce fs t
-bet_check fs c   (App t1@(Var _)   n) = let (bet_red,(fs',ns)) = bet_check fs c n
-    in  (bet_red,(fs',App t1 ns))
-bet_check fs c t@(App t1@(App _ _) n) = let (bet_red,(fs',ts)) = bet_check fs c t1
-    in  recurse_check fs' c bet_red ts t1 n bet_check
-bet_check fs c t                      = (False,(fs,t))
+bet_check :: Term -> VM (Bool,Term)
+bet_check t@(App    (Lam _ _) n) = beta_reduce t
+bet_check (App t1@(Con _)   n) = do
+  (bet_red,ns) <- bet_check n
+  return $ (bet_red,App t1 ns)
+bet_check (App t1@(Var _)   n) = do
+  (bet_red,ns) <- bet_check n
+  return $ (bet_red,App t1 ns)
+bet_check t@(App t1@(App _ _) n) = do
+  (bet_red,ts) <- bet_check t1
+  recurse_check bet_red ts t1 n bet_check
+bet_check t                      = return (False,t)
 
-mu_check :: [Name] -> CombinatorStore -> Term -> (Bool,([Name],Term))
-mu_check fs c t@(App t1@(Var _)   n) = let (mu_red,ts) = mu_reduce c t1
-           in recurse_check fs c mu_red ts t1 n mu_check
-mu_check fs c t@(App t1@(App _ _) n) = let (mu_red,(fs',ts)) = mu_check fs c t1
-             in recurse_check fs' c mu_red ts t1 n mu_check
-mu_check fs c t                      = (False,(fs,t))
+mu_check :: Term -> VM (Bool,Term)
+mu_check t@(App t1@(Var _)   n) = do
+  (mu_red,ts) <- mu_reduce t1
+  recurse_check mu_red ts t1 n mu_check
+mu_check t@(App t1@(App _ _) n) = do
+  (mu_red,ts) <- mu_check t1
+  recurse_check mu_red ts t1 n mu_check
+mu_check t                      = return (False,t)
 
-eta_check :: [Name] -> CombinatorStore -> Term -> (Bool,([Name],Term))
-eta_check fs c t@(Lam _ (App _ (Var _))) = (\(b,t') -> (b,(fs,t'))) $ eta_reduce t
-eta_check fs _ t                         = (False,(fs,t))
+eta_check :: Term -> VM (Bool,Term)
+eta_check t@(Lam _ (App _ (Var _))) = return $ eta_reduce t
+eta_check t                         = return (False,t)
 
 {-----------------------------------------------------------------------}
 {- normal order evaluation (leftmost, outermost) -}
 
-normal_order :: [Name] -> CombinatorStore -> Term -> Term
+domap :: Constants -> Term -> Term
+domap _ t@(Con _) = t
+domap c t@(Var v)
+  | M.member v c = Con v
+  | otherwise    = t
+domap c t@(Lam x m)
+  | M.member x c = error "named constant as abstractor"
+  | otherwise    = Lam x (domap c m)
+domap c (App m n) = App (domap c m) (domap c n)
+
+normal_order :: Term -> VM Term
 --normal_order c t = let (_,ms) = eta_check c $ normal_order' c t
 --in ms
-normal_order = normal_order'
+normal_order t = do
+  cs <- gets consts
+  normal_order' (domap cs t)
 
-normal_order' :: [Name] -> CombinatorStore -> Term -> Term
-normal_order' _  _ t@(Var _)   = t
-normal_order' fs c t@(Lam x m) = Lam x (normal_order' fs c m)
-normal_order' fs c t@(App l m) = let (mu_red,(fs',ms)) = mu_check fs c t
- in if (mu_red) 
-    then normal_order' fs' c ms  
-    else let (bet_red,(fs'',bs)) = bet_check fs c t 
-          in if (bet_red)   
-then normal_order' fs'' c bs
-      else bs
+normal_order' :: Term -> VM Term
+normal_order' t@(Con _)   = return t
+normal_order' t@(Var _)   = do
+  (mu_red,t') <- mu_check t
+  return t'
+normal_order' t@(Lam x m) = do
+  n <- normal_order' m
+  (e,n') <- eta_check (Lam x n)
+  return n' 
+normal_order' t@(App l m) = do
+  (mu_red,ms) <- mu_check t
+  if (mu_red) 
+    then normal_order' ms  
+    else do
+         (bet_red,bs) <- bet_check t 
+         if (bet_red)   
+            then normal_order' bs
+            else return bs
 
 {-----------------------------------------------------------------------}
 {- evaluation -}
 
-eval :: Term -> Term
-eval = normal_order  fresh combinators
+eval :: Names -> Term -> Term
+eval ns t = fst $ runVariableMonad (normal_order t) ns
+
+{-----------------------------------------------------------------------}
+{- de Bruin indices -}
+
+data DBTerm = DBCon Name
+  | DBVar Integer
+  | DBLam DBTerm
+  | DBApp DBTerm DBTerm
+  deriving(Eq,Show,Read)
+
+to_debruijn :: Term -> DBTerm
+to_debruijn = to_debruijn' []
+
+increment :: [(Name,Integer)] -> [(Name,Integer)]
+increment = L.map (\(n,i) -> (n,i+1))
+
+to_debruijn' :: [(Name,Integer)] -> Term -> DBTerm
+to_debruijn' _ (Con c) = DBCon c
+to_debruijn' b (Var v)
+  | elem v (fst $ unzip b) = DBVar ((\(Just i) -> i) $ L.lookup v b)
+  | otherwise              = error $ "to_debruijn': unbound variable" ++ "\n" ++ (show b)
+to_debruijn' b (Lam x m)
+  | elem x (fst $ unzip b) = error "to_debruijn': variable already bound"
+  | otherwise              = DBLam (to_debruijn' ((x,1):(increment b)) m)
+to_debruijn' b (App l m) = let l' = to_debruijn' b l
+                               m' = to_debruijn' b m
+                           in DBApp l' m'
+
+compareByDB :: Term -> Term -> Bool
+compareByDB t1 t2 = to_debruijn t1 == to_debruijn t2
+
+from_debruijn :: DBTerm -> Term
+from_debruijn = from_debruijn' fresh []
+
+from_debruijn' :: [Name] -> [Name] -> DBTerm -> Term
+from_debruijn' _      _  (DBCon c)   = Con c
+from_debruijn' fs     bs (DBVar i)   = Var (head $ L.drop ((fromInteger i)- 1) bs)
+from_debruijn' (f:fs) bs (DBLam l)   = Lam f (from_debruijn' fs (f:bs) l)
+from_debruijn' fs     bs (DBApp l m) = App (from_debruijn' fs bs l) (from_debruijn' fs bs m)
+
+dename :: Term -> VM Term
+dename t@(Con _) = return t
+dename t@(Var v) = do
+  c <- combinator v
+  if isJust c
+    then dename $ (\(Just x) -> x) c
+    else return $ t
+dename (Lam x m) = do
+  m' <- dename m
+  y <- next
+  m'' <- subst' (Var y) x m'
+  normal_order' $ Lam y m''
+dename (App l m) = do
+  l' <- dename l
+  m' <- dename m
+  normal_order' $ App l' m'
 
 {-----------------------------------------------------------------------}
 {- PRINT -}
@@ -343,9 +495,11 @@ _print'' p t@(Lam _ _) = print_bra (_print' p t)
 _print'' p t           = _print' p t
 
 _print' :: String -> Term -> String
+_print' p   (Con n)                 = print_var p n
 _print' p   (Var n)                 = print_var p n
 _print' p t@(Lam _ _)               = print_lam p t
-_print' p t@(App t1   t2@(App _ _)) = _print' p t1 ++ print_bra (_print' p t2) 
+_print' p t@(App t1   t2@(App _ _)) = _print' p t1 ++ sp p ++ print_bra (_print' p t2) 
+_print' p t@(App t1   t2@(Con _))   = _print'' p t1 ++ sp p ++ _print' p t2  
 _print' p t@(App t1   t2@(Var _))   = _print'' p t1 ++ sp p ++ _print' p t2  
 _print' p t@(App t1   t2)           = _print'' p t1 ++ _print'' p t2 
 
@@ -370,21 +524,27 @@ unparse = ascii_print
 {-----------------------------------------------------------------------}
 {- read, eval, print -}
 
-normal :: String -> String
-normal = unparse . eval . parse
+normal :: Names -> String -> String
+normal ns = unparse . (eval ns) . parse
 
 {-----------------------------------------------------------------------}
 {- the main function -}
 
-main :: IO ()
-main = do
+repl :: Names -> IO ()
+repl n = do
   putStr "lambda term? "
   hFlush stdout
   input <- getLine
   case input of
        "quit" -> putStr "bye.\n"
-       _      -> do putStr ("-> " ++ normal input ++ "\n")
-                    main
+       _      -> do putStr ("-> " ++ normal n input ++ "\n")
+                    repl n 
+
+main :: IO ()
+main = do
+  let ct = constants
+      cb = M.map (domap ct . parse) combinators
+  repl (ND cb ct fresh)
 
 {-----------------------------------------------------------------------}
 

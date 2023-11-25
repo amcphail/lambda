@@ -1,7 +1,7 @@
 -----------------------------------------------------------------------------
 -- |
--- Module      :  Combinators
--- Copyright   :  (c) Alexander Vivian Hugh McPhail 2000, 2015
+-- Module      :  Names
+-- Copyright   :  (c) Alexander Vivian Hugh McPhail 2000, 2015, 2023
 -- License     :  BSD3
 --
 -- Maintainer  :  haskell.vivian.mcphail <at> gmail <dot> com
@@ -11,10 +11,12 @@
 -- Lambda combinators
 --
 -----------------------------------------------------------------------------
-module Combinators (
+module Names (
   module Data.Map
-  , CombinatorStore
+  , Combinators
   , combinators
+  , Constants
+  , constants
   ) where
 
 {-----------------------------------------------------------------------}
@@ -30,10 +32,12 @@ import qualified Prelude as P
 
 {-----------------------------------------------------------------------}
 
+type Constant = P.String
 type Variable = P.String
 type Function = P.String
 
-type CombinatorStore = Map Variable Function
+type Constants = Map Variable ()
+type Combinators = Map Variable Function
 
 {-----------------------------------------------------------------------}
 {- parsers -}
@@ -65,11 +69,17 @@ identifier = (first P.. plus) (satisfy isAlpha)
 function :: Parser Char Function
 function = untilEOL <& eol 
 
-doLine :: Parser Char (Variable,Function)
-doLine = ((space identifier <& space equals) <&> space function)
+doLineConstants :: Parser Char Constant
+doLineConstants = (space identifier <& (untilEOL <& eol))
 
-doFile :: Parser Char [(Variable,Function)]
-doFile = (first P.. plus) doLine
+doLineCombinators :: Parser Char (Variable,Function)
+doLineCombinators = ((space identifier <& space equals) <&> space function)
+
+doFileConstants :: Parser Char [Constant]
+doFileConstants = (first P.. plus) doLineConstants
+
+doFileCombinators :: Parser Char [(Variable,Function)]
+doFileCombinators = (first P.. plus) doLineCombinators
 
 {-----------------------------------------------------------------------}
 
@@ -78,11 +88,17 @@ getFileContents fn = unsafePerformIO (readFile fn)
 
 {-----------------------------------------------------------------------}
 
-loadVariables :: [(Variable,Function)]
-loadVariables = P.snd P.. P.head P.. doFile P.$ getFileContents "variables.lam"
+loadConstants :: [Constant]
+loadConstants = P.snd P.. P.head P.. doFileConstants P.$ getFileContents "constants.lam"
 
-combinators :: CombinatorStore
-combinators = fromList loadVariables
+constants :: Constants
+constants = fromList P.$ P.map (\x -> (x,())) loadConstants
+
+loadCombinators :: [(Variable,Function)]
+loadCombinators = P.snd P.. P.head P.. doFileCombinators P.$ getFileContents "combinators.lam"
+
+combinators :: Combinators
+combinators = fromList loadCombinators
 
 {-----------------------------------------------------------------------}
 
